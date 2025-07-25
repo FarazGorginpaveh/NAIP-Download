@@ -1,0 +1,103 @@
+# -*- coding: utf-8 -*-
+"""
+Created on Fri Jul 25 12:35:04 2025
+
+@author: Faraz Gorginpaveh
+"""
+
+# ---------------------------------------------------------------
+# Title: Parallel Clip CAFO 10km Patches per Tile (GA, 20 cores)
+# ---------------------------------------------------------------
+
+import os
+import rasterio
+from rasterio.windows import from_bounds
+from shapely.geometry import box
+import geopandas as gpd
+import pandas as pd
+from concurrent.futures import ProcessPoolExecutor
+from functools import partial
+
+# === File paths ===
+cafo_csv = 'CAFOs in Georgia.csv'
+tiles_root = 'Georgia'
+output_dir = os.path.join(tiles_root, 'CAFOs_GA')
+os.makedirs(output_dir, exist_ok=True)
+
+# === Load CAFOs and convert to GeoDataFrame ===
+df = pd.read_csv(cafo_csv).dropna(subset=['LAT', 'LONG', 'CAFO_TYPE'])
+gdf = gpd.GeoDataFrame(df, geometry=gpd.points_from_xy(df['LONG'], df['LAT']), crs='EPSG:4326').to_crs('EPSG:26916')
+
+# === Get tile .tif paths
+tile_paths = []
+for folder in os.listdir(tiles_root):
+    if folder.endswith('_Output'):
+        for fname in os.listdir(os.path.join(tiles_root, folder)):
+            if fname.endswith('_mosaic_clipped.tif'):
+                tile_paths.append(os.path.join(tiles_root, folder, fname))
+
+
+def process_cafo(idx_row, tile_paths, output_dir):
+    idx, row = idx_row
+    cafo_type = row['CAFO_TYPE']
+    lat, lon = row['LAT'], row['LONG']
+    x, y = row.geometry.x, row.geometry.y
+    buffer_m = 5000
+    bbox = box(x - buffer_m, y - buffer_m, x + buffer_m, y + buffer_m)
+
+    has_data = False
+    results = []
+
+    for tile_path in tile_paths:
+        try:
+            with rasterio.open(tile_path) as src:
+                tile_bounds = box(*src.bounds)
+                if not tile_bounds.intersects(bbox):
+                    continue
+
+                intersection = tile_bounds.intersection(bbox)
+                if intersection.is_empty:
+                    continue
+
+                window = from_bounds(*intersection.bounds, transform=src.transform).round_offsets().round_lengths()
+                if window.width == 0 or window.height == 0:
+                    continue
+
+                data = src.read(window=window)
+                if data is None or data.size == 0 or (data == 0).all():
+                    continue  # Skip tiles with no meaningful data
+
+                out_meta = src.meta.copy()
+                out_meta.update({
+                    "driver": "GTiff",
+                    "height": int(window.height),
+                    "width": int(window.width),
+                    "transform": rasterio.windows.transform(window, src.transform)
+                })
+
+                tile_id = os.path.basename(tile_path).split('_')[2]
+                out_name = f"{cafo_type}_Lat_{lat:.7f}_Lon_{lon:.7f}_tile_{tile_id}.tif"
+                out_path = os.path.join(output_dir, out_name)
+
+                with rasterio.open(out_path, 'w', **out_meta) as dest:
+                    dest.write(data)
+
+                results.append(out_path)
+                has_data = True
+        except Exception as e:
+            print(f"⚠️ Error for CAFO {idx} on tile {tile_path}: {e}")
+
+    if not has_data:
+        print(f"⚠️ Skipped CAFO {idx} at ({lat}, {lon}) — no overlapping data found.")
+
+    return results
+
+
+
+# === Parallel execution ===
+with ProcessPoolExecutor(max_workers=20) as executor:
+    all_idx_rows = list(gdf.iterrows())
+    func = partial(process_cafo, tile_paths=tile_paths, output_dir=output_dir)
+    results = list(executor.map(func, all_idx_rows))
+
+print("✅ All CAFO patches processed and saved.")
