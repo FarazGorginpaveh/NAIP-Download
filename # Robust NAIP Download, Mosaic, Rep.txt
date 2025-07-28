@@ -1,0 +1,240 @@
+# Robust NAIP Download, Mosaic, Reprojection, and Clipping Pipeline for Georgia
+
+This script is a complete pipeline that performs the following tasks:
+
+* Generates a 10x10 tiling grid over the state of Georgia
+* Downloads NAIP imagery (National Agriculture Imagery Program) from the Microsoft Planetary Computer using the STAC API
+* Automatically retries failed STAC queries and image downloads
+* Reprojects all imagery to a target CRS (default: EPSG:26916)
+* Mosaics all downloaded images that intersect a given tile
+* Clips the mosaic to the tile boundary
+* Writes the result as a GeoTIFF file for each tile
+
+The script is parallelized using Python's `multiprocessing` to process multiple tiles simultaneously.
+
+---
+
+## PART 1: Tile Grid Generation
+
+```python
+# Load US states shapefile and filter to Georgia
+shapefile_path = "/icebox/data/shares/mh1/fgorginpaveh/US shapefile/tl_2024_us_state.shp"
+states = gpd.read_file(shapefile_path).to_crs("EPSG:4326")
+georgia = states[states['NAME'].str.lower() == 'georgia']
+```
+
+* Loads U.S. state boundaries and filters to Georgia.
+* Ensures the CRS is geographic (EPSG:4326) for tiling.
+
+```python
+ga_geom = georgia.geometry.values[0]
+ga_bounds = ga_geom.bounds  # (minx, miny, maxx, maxy)
+```
+
+* Extracts Georgia's boundary geometry and bounding box.
+
+```python
+# Generate 10x10 tile grid over Georgia's bounding box
+rows, cols = 10, 10
+width = (maxx - minx) / cols
+height = (maxy - miny) / rows
+```
+
+* Defines the grid resolution and calculates the width/height of each tile.
+
+```python
+# Create grid tiles as shapely polygons
+tiles = []
+for i in range(rows):
+    for j in range(cols):
+        x1 = minx + j * width
+        y1 = miny + i * height
+        x2 = x1 + width
+        y2 = y1 + height
+        tile = box(x1, y1, x2, y2)
+        tiles.append(tile)
+```
+
+* Constructs tile polygons using bounding coordinates.
+
+```python
+# Clip grid tiles to Georgia's actual shape
+tiles_gdf = gpd.GeoDataFrame(geometry=tiles, crs="EPSG:4326")
+tiles_clipped = gpd.overlay(tiles_gdf, georgia, how="intersection")
+```
+
+* Converts grid to GeoDataFrame and intersects it with Georgia.
+
+```python
+# Add tile IDs based on row/column indexing
+tiles_clipped["row"] = np.repeat(np.arange(rows), cols)[:len(tiles_clipped)]
+tiles_clipped["col"] = np.tile(np.arange(cols), rows)[:len(tiles_clipped)]
+tiles_clipped["tile_id"] = ["tile_%02d_%02d" % (r, c) for r, c in zip(tiles_clipped["row"], tiles_clipped["col"])]
+```
+
+* Labels each tile with a unique `tile_id` based on grid index.
+
+```python
+# Save to shapefile
+output_path = "/icebox/data/shares/mh1/fgorginpaveh/Georgia/GA_100_tiles.shp"
+tiles_clipped.to_file(output_path)
+```
+
+* Exports the resulting tile grid to disk.
+
+---
+
+## PART 2: STAC Query and Download Helpers
+
+```python
+def download_with_retry(url, out_fp, max_retries=5):
+```
+
+* Tries to download a file from `url` up to `max_retries` times.
+* If it fails, it waits longer each time (exponential backoff).
+* Returns `True` on success, `False` otherwise.
+
+```python
+def query_stac_with_retry(geom):
+```
+
+* Attempts to query Planetary Computer STAC API using a polygon geometry.
+* Repeats the query on failure up to `max_retries` times.
+* Returns list of image items.
+
+---
+
+## PART 3: Tile Processing Function
+
+```python
+def process_tile(tile_id):
+```
+
+Main worker function that processes one tile ID. Steps:
+
+### Step 1: Setup
+
+```python
+download_dir = f".../{tile_id}_Images"
+output_dir = f".../{tile_id}_Output"
+```
+
+* Defines folders to save raw images and processed outputs.
+* Creates them if not exist.
+
+```python
+if os.path.exists(output_fp): return
+```
+
+* Skips processing if output already exists.
+
+### Step 2: Load Geometry
+
+```python
+tile_4326 = tiles_gdf[...]     # for querying imagery
+tile_utm = tiles_gdf[...]      # for reprojection & clipping
+```
+
+* Loads tile geometry in both WGS84 and target CRS (EPSG:26916).
+
+### Step 3: STAC Query
+
+```python
+items = query_stac_with_retry(geom_4326)
+```
+
+* Searches NAIP collection for overlapping images in given years.
+
+### Step 4: Download
+
+```python
+for item in items:
+    url = item.assets["image"].href
+    download_with_retry(url, out_fp)
+```
+
+* Downloads all TIFFs using signed URLs.
+
+### Step 5: Reprojection (if needed)
+
+```python
+if src.crs != target_crs:
+    reproject(...)
+```
+
+* If the TIFF has a different CRS, reprojects to the target CRS.
+* Uses bilinear resampling and writes to a temp file.
+
+### Step 6: Mosaic
+
+```python
+mosaic, mosaic_transform = merge(srcs, bounds=geom_bounds)
+```
+
+* Merges all source TIFFs into one raster.
+* Ensures mosaic only covers tile bounds.
+
+### Step 7: Clip
+
+```python
+mask(..., shapes=[tile_geom])
+```
+
+* Clips the mosaic tightly to the tile shape (not just bounding box).
+
+### Step 8: Save
+
+```python
+with rasterio.open(output_fp, "w", **meta): dst.write(clipped)
+```
+
+* Writes the final clipped mosaic to GeoTIFF.
+
+---
+
+## PART 4: Parallel Execution
+
+```python
+def main():
+    tile_ids = tiles_gdf["tile_id"].tolist()
+    with Pool(num_workers) as pool:
+        pool.imap(process_tile, tile_ids)
+```
+
+* Loads all tile IDs.
+* Uses `multiprocessing.Pool` to process each tile in parallel.
+
+---
+
+## TO RUN FOR OTHER YEARS:
+
+Change:
+
+```python
+year = 2017
+```
+
+To:
+
+```python
+years = [2018, 2019]
+```
+
+Then replace STAC query with:
+
+```python
+items = []
+for yr in years:
+    search = client.search(... datetime=f"{yr}-01-01/{yr}-12-31" ...)
+    items.extend(list(search.items()))
+```
+
+Then optionally remove duplicates:
+
+```python
+items = {item.id: item for item in items}.values()
+```
+
+---
+
+This concludes the complete summary of the pipeline.
