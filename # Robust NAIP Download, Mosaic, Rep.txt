@@ -1,4 +1,4 @@
-#Author: Faraz Gorginpaveh
+#Author: Faraz Gorginpaveh 
 # Robust NAIP Download, Mosaic, Reprojection, and Clipping Pipeline for Georgia
 
 This script is a complete pipeline that performs the following tasks:
@@ -239,4 +239,5 @@ items = {item.id: item for item in items}.values()
 ---
 
 This concludes the complete summary of the pipeline.
+
 
