@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 Created on Thu Jul 17 20:11:16 2025
-
+ 
 @author: Faraz Gorginpaveh
 """
 
@@ -127,3 +127,4 @@ for idx, row in tqdm(tiles_gdf.iterrows(), total=len(tiles_gdf)):
 df_stats = pd.DataFrame(tile_stats)
 df_stats.to_csv("GA_NAIP2017_Tile_Coverage.csv", index=False)
 print("\n✅ Done. Saved tile-by-tile coverage to GA_NAIP2017_Tile_Coverage.csv")
+
