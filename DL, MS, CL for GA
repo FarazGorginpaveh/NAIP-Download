@@ -7,7 +7,7 @@
 #   - Mosaics and clips imagery per tile geometry (even with partial coverage)
 #   - Parallelized for efficient processing
 # Author: Faraz Gorgin
-# Date: July 2025
+# Date: July 2025 
 # ======================================================================================
 
 import os
